@@ -1,5 +1,7 @@
 # FluidSimASCII
 
+[![Go Report Card](https://goreportcard.com/badge/github.com/simonwaldherr/fluidsimascii)](https://goreportcard.com/report/github.com/simonwaldherr/fluidsimascii)  
+
 This is a [Golang](http://golang.org/) fluid simulator using the "[Smoothed-particle hydrodynamics (SPH)](http://en.wikipedia.org/wiki/Smoothed-particle_hydrodynamics)" method.
 
 ## origin
