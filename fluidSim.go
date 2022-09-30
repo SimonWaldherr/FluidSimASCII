@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"fmt"
 	"math"
 	"os"
@@ -28,14 +29,20 @@ type Particle struct {
 var particles [CONSOLE_WIDTH * CONSOLE_HEIGHT * 2]Particle
 var xParticleDistance, yParticleDistance, particlesInteraction, particlesDistance float64
 var x, y, screenBufferIndex, totalOfParticles int
-var gravity int = 1
-var pressure int = 4
-var viscosity int = 7
+
+var gravity, pressure, viscosity int
+
 var screenBuffer [CONSOLE_WIDTH*CONSOLE_HEIGHT + 1]byte
 var char rune
 var err error
 
 func main() {
+	flag.IntVar(&gravity, "g", 1, "gravity")
+	flag.IntVar(&pressure, "p", 4, "pressure")
+	flag.IntVar(&viscosity, "v", 7, "viscosity")
+
+	flag.Parse()
+
 	fmt.Println("\x1b[2J")
 	var particlesCounter int = 0
 	reader := bufio.NewReader(os.Stdin)
