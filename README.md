@@ -17,6 +17,6 @@ The code contained there, respectively the entire repository, is under the [CC-0
 You can run it like this:
 
 ```sh
-go run fluidSim.go < demo01.txt
+go run fluidSim.go < demo/demo01.txt
 ```
 
