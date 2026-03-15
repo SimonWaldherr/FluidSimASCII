@@ -63,12 +63,12 @@ func stepDensity(particles []Particle, n int) {
 	for i := 0; i < n; i++ {
 		particles[i].Density = float64(particles[i].Wallflag * 9)
 		for j := 0; j < n; j++ {
-			dx := particles[i].XPos - particles[j].XPos
-			dy := particles[i].YPos - particles[j].YPos
-			// Interaction radius is 2.0; skip if dist² > 4.
-			if distSq := dx*dx + dy*dy; distSq <= 4.0 {
-				q := math.Sqrt(distSq)/2.0 - 1.0
-				particles[i].Density += q * q
+			xParticleDistance := particles[i].XPos - particles[j].XPos
+			yParticleDistance := particles[i].YPos - particles[j].YPos
+			particlesDistance := math.Sqrt(math.Pow(xParticleDistance, 2.0) + math.Pow(yParticleDistance, 2.0))
+			particlesInteraction := particlesDistance/2.0 - 1.0
+			if math.Floor(1.0-particlesInteraction) > 0 {
+				particles[i].Density += particlesInteraction * particlesInteraction
 			}
 		}
 	}
@@ -80,13 +80,13 @@ func stepForces(particles []Particle, n int, grav, pres, visc float64) {
 		particles[i].YForce = grav
 		particles[i].XForce = 0
 		for j := 0; j < n; j++ {
-			dx := particles[i].XPos - particles[j].XPos
-			dy := particles[i].YPos - particles[j].YPos
-			if distSq := dx*dx + dy*dy; distSq <= 4.0 {
-				q := math.Sqrt(distSq)/2.0 - 1.0
-				pressureTerm := q * (3 - particles[i].Density - particles[j].Density) * pres
-				particles[i].XForce += (dx*pressureTerm + (particles[i].XVelocity-particles[j].XVelocity)*visc) / particles[i].Density
-				particles[i].YForce += (dy*pressureTerm + (particles[i].YVelocity-particles[j].YVelocity)*visc) / particles[i].Density
+			xParticleDistance := particles[i].XPos - particles[j].XPos
+			yParticleDistance := particles[i].YPos - particles[j].YPos
+			particlesDistance := math.Sqrt(math.Pow(xParticleDistance, 2.0) + math.Pow(yParticleDistance, 2.0))
+			particlesInteraction := particlesDistance/2.0 - 1.0
+			if math.Floor(1.0-particlesInteraction) > 0 {
+				particles[i].XForce += particlesInteraction * (xParticleDistance*(3-particles[i].Density-particles[j].Density)*pres + particles[i].XVelocity*visc - particles[j].XVelocity*visc) / particles[i].Density
+				particles[i].YForce += particlesInteraction * (yParticleDistance*(3-particles[i].Density-particles[j].Density)*pres + particles[i].YVelocity*visc - particles[j].YVelocity*visc) / particles[i].Density
 			}
 		}
 	}
@@ -98,13 +98,13 @@ func stepForces(particles []Particle, n int, grav, pres, visc float64) {
 func integrateAndRasterize(particles []Particle, n int, screenBuf []byte, width, height int) {
 	for i := 0; i < n; i++ {
 		if particles[i].Wallflag == 0 {
-			// Clamp large forces to improve numerical stability.
-			divisor := 10.0
-			if particles[i].XForce*particles[i].XForce+particles[i].YForce*particles[i].YForce >= 4.2*4.2 {
-				divisor = 11.0
+			if math.Sqrt(math.Pow(particles[i].XForce, 2.0)+math.Pow(particles[i].YForce, 2.0)) < 4.2 {
+				particles[i].XVelocity += particles[i].XForce / 10
+				particles[i].YVelocity += particles[i].YForce / 10
+			} else {
+				particles[i].XVelocity += particles[i].XForce / 11
+				particles[i].YVelocity += particles[i].YForce / 11
 			}
-			particles[i].XVelocity += particles[i].XForce / divisor
-			particles[i].YVelocity += particles[i].YForce / divisor
 			particles[i].XPos += particles[i].XVelocity
 			particles[i].YPos += particles[i].YVelocity
 		}
@@ -123,13 +123,12 @@ func integrateAndRasterize(particles []Particle, n int, screenBuf []byte, width,
 // buildFrame converts the bit-mask screenBuf into a printable ASCII frame.
 // The returned slice has length width*height+1 (includes newlines).
 func buildFrame(screenBuf []byte, width, height int) []byte {
-	const charset = " '`-.|//,\\|\\_\\/#"
 	frame := make([]byte, width*height+1)
 	for k := 0; k < width*height; k++ {
 		if k%width == width-1 {
 			frame[k] = '\n'
 		} else {
-			frame[k] = charset[screenBuf[k]]
+			frame[k] = byte(" '`-.|//,\\|\\_\\/#"[screenBuf[k]])
 		}
 	}
 	return frame
@@ -158,7 +157,7 @@ func main() {
 	particles := make([]Particle, maxParticles)
 	screenBuf := make([]byte, consoleWidth*consoleHeight)
 
-	fmt.Print("\x1b[2J")
+	fmt.Println("\x1b[2J")
 
 	totalOfParticles := parseScene(os.Stdin, particles)
 
@@ -191,7 +190,7 @@ func main() {
 
 	frameDuration := time.Second / time.Duration(targetFPS)
 	for {
-		fmt.Print("\x1b[1;1H")
+		fmt.Println("\x1b[1;1H")
 		time.Sleep(frameDuration)
 		fmt.Printf("%s", <-buffer)
 	}
