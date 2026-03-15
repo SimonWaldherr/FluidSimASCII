@@ -4,17 +4,13 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"time"
 )
 
-const CONSOLE_WIDTH = 80
-const CONSOLE_HEIGHT = 24
-
-var xSandboxAreaScan int = 0
-var ySandboxAreaScan int = 0
-
+// Particle represents a single SPH simulation particle (fluid or wall).
 type Particle struct {
 	XPos      float64
 	YPos      float64
@@ -26,129 +22,177 @@ type Particle struct {
 	YVelocity float64
 }
 
-var particles [CONSOLE_WIDTH * CONSOLE_HEIGHT * 2]Particle
-var xParticleDistance, yParticleDistance, particlesInteraction, particlesDistance float64
-var x, y, screenBufferIndex, totalOfParticles int
+// parseScene reads an ASCII scene description from r and populates the
+// particles slice. It returns the number of particles placed.
+// Each non-space, non-newline character becomes two vertically stacked
+// particles; '#' characters become immovable wall particles.
+func parseScene(r io.Reader, particles []Particle) int {
+	xScan := 0
+	yScan := 0
+	total := 0
+	reader := bufio.NewReader(r)
+	for {
+		char, _, err := reader.ReadRune()
+		if err != nil {
+			break
+		}
+		switch char {
+		case '\n':
+			yScan += 2
+			xScan = -1
+		case ' ':
+			// no particle at this position
+		case '#':
+			particles[total].Wallflag = 1
+			particles[total+1].Wallflag = 1
+			fallthrough
+		default:
+			particles[total].XPos = float64(xScan)
+			particles[total].YPos = float64(yScan)
+			particles[total+1].XPos = float64(xScan)
+			particles[total+1].YPos = float64(yScan + 1)
+			total += 2
+		}
+		xScan++
+	}
+	return total
+}
 
-var gravity, pressure, viscosity int
+// stepDensity computes the density for each particle based on its neighbours.
+func stepDensity(particles []Particle, n int) {
+	for i := 0; i < n; i++ {
+		particles[i].Density = float64(particles[i].Wallflag * 9)
+		for j := 0; j < n; j++ {
+			dx := particles[i].XPos - particles[j].XPos
+			dy := particles[i].YPos - particles[j].YPos
+			// Interaction radius is 2.0; skip if dist² > 4.
+			if distSq := dx*dx + dy*dy; distSq <= 4.0 {
+				q := math.Sqrt(distSq)/2.0 - 1.0
+				particles[i].Density += q * q
+			}
+		}
+	}
+}
 
-var screenBuffer [CONSOLE_WIDTH*CONSOLE_HEIGHT + 1]byte
-var char rune
-var err error
+// stepForces computes the pressure and viscosity forces for each particle.
+func stepForces(particles []Particle, n int, grav, pres, visc float64) {
+	for i := 0; i < n; i++ {
+		particles[i].YForce = grav
+		particles[i].XForce = 0
+		for j := 0; j < n; j++ {
+			dx := particles[i].XPos - particles[j].XPos
+			dy := particles[i].YPos - particles[j].YPos
+			if distSq := dx*dx + dy*dy; distSq <= 4.0 {
+				q := math.Sqrt(distSq)/2.0 - 1.0
+				pressureTerm := q * (3 - particles[i].Density - particles[j].Density) * pres
+				particles[i].XForce += (dx*pressureTerm + (particles[i].XVelocity-particles[j].XVelocity)*visc) / particles[i].Density
+				particles[i].YForce += (dy*pressureTerm + (particles[i].YVelocity-particles[j].YVelocity)*visc) / particles[i].Density
+			}
+		}
+	}
+}
+
+// integrateAndRasterize updates particle positions (fluid only) and writes
+// presence bits into screenBuf for the current frame.
+// screenBuf must have length width*height and be zeroed before each call.
+func integrateAndRasterize(particles []Particle, n int, screenBuf []byte, width, height int) {
+	for i := 0; i < n; i++ {
+		if particles[i].Wallflag == 0 {
+			// Clamp large forces to improve numerical stability.
+			divisor := 10.0
+			if particles[i].XForce*particles[i].XForce+particles[i].YForce*particles[i].YForce >= 4.2*4.2 {
+				divisor = 11.0
+			}
+			particles[i].XVelocity += particles[i].XForce / divisor
+			particles[i].YVelocity += particles[i].YForce / divisor
+			particles[i].XPos += particles[i].XVelocity
+			particles[i].YPos += particles[i].YVelocity
+		}
+		x := int(particles[i].XPos)
+		y := int(particles[i].YPos / 2)
+		idx := x + width*y
+		if y >= 0 && y < height-1 && x >= 0 && x < width-1 {
+			screenBuf[idx] |= 8
+			screenBuf[idx+1] |= 4
+			screenBuf[idx+width] |= 2
+			screenBuf[idx+width+1] |= 1
+		}
+	}
+}
+
+// buildFrame converts the bit-mask screenBuf into a printable ASCII frame.
+// The returned slice has length width*height+1 (includes newlines).
+func buildFrame(screenBuf []byte, width, height int) []byte {
+	const charset = " '`-.|//,\\|\\_\\/#"
+	frame := make([]byte, width*height+1)
+	for k := 0; k < width*height; k++ {
+		if k%width == width-1 {
+			frame[k] = '\n'
+		} else {
+			frame[k] = charset[screenBuf[k]]
+		}
+	}
+	return frame
+}
 
 func main() {
+	var (
+		gravity       int
+		pressure      int
+		viscosity     int
+		consoleWidth  int
+		consoleHeight int
+		targetFPS     int
+	)
+
 	flag.IntVar(&gravity, "g", 1, "gravity")
 	flag.IntVar(&pressure, "p", 4, "pressure")
 	flag.IntVar(&viscosity, "v", 7, "viscosity")
+	flag.IntVar(&consoleWidth, "w", 80, "console width in characters")
+	flag.IntVar(&consoleHeight, "h", 24, "console height in characters")
+	flag.IntVar(&targetFPS, "fps", 12, "maximum frames per second")
 
 	flag.Parse()
 
-	fmt.Println("\x1b[2J")
-	var particlesCounter int = 0
-	reader := bufio.NewReader(os.Stdin)
+	maxParticles := consoleWidth * consoleHeight * 2
+	particles := make([]Particle, maxParticles)
+	screenBuf := make([]byte, consoleWidth*consoleHeight)
 
-	for err == nil {
-		char, _, err = reader.ReadRune()
+	fmt.Print("\x1b[2J")
 
-		switch char {
-		case '\n':
-			ySandboxAreaScan += 2
-			xSandboxAreaScan = -1
-		case ' ':
-		case '#':
-			p := &particles[particlesCounter+1].Wallflag
-			particles[particlesCounter+1].Wallflag = 1
-			particles[particlesCounter].Wallflag = *p
-			fallthrough
-		default:
-			particles[particlesCounter].XPos = float64(xSandboxAreaScan)
-			particles[particlesCounter].YPos = float64(ySandboxAreaScan)
-			particles[particlesCounter+1].XPos = float64(xSandboxAreaScan)
-			particles[particlesCounter+1].YPos = float64(ySandboxAreaScan + 1)
-			particlesCounter += 2
-			totalOfParticles = particlesCounter
-		}
-		xSandboxAreaScan += 1
-	}
+	totalOfParticles := parseScene(os.Stdin, particles)
 
-	buffer := make(chan [CONSOLE_WIDTH*CONSOLE_HEIGHT + 1]byte, 200)
+	// Pre-convert simulation constants to float64 once, outside the hot loop.
+	grav := float64(gravity)
+	pres := float64(pressure)
+	visc := float64(viscosity)
+
+	// Each frame is a freshly allocated slice sent over the channel so that
+	// the rendering goroutine and the simulation goroutine never share memory.
+	buffer := make(chan []byte, 200)
 
 	go func() {
 		for {
-			var particlesCursor, particlesCursor2 int
+			stepDensity(particles, totalOfParticles)
+			stepForces(particles, totalOfParticles, grav, pres, visc)
 
-			for particlesCursor = 0; particlesCursor < totalOfParticles; particlesCursor++ {
-				particles[particlesCursor].Density = float64(particles[particlesCursor].Wallflag * 9)
-				for particlesCursor2 = 0; particlesCursor2 < totalOfParticles; particlesCursor2++ {
-					xParticleDistance = particles[particlesCursor].XPos - particles[particlesCursor2].XPos
-					yParticleDistance = particles[particlesCursor].YPos - particles[particlesCursor2].YPos
-					particlesDistance = math.Sqrt(math.Pow(xParticleDistance, 2.0) + math.Pow(yParticleDistance, 2.0))
-					particlesInteraction = particlesDistance/2.0 - 1.0
-					if math.Floor(1.0-particlesInteraction) > 0 {
-						particles[particlesCursor].Density += particlesInteraction * particlesInteraction
-					}
-				}
+			for k := range screenBuf {
+				screenBuf[k] = 0
 			}
 
-			for particlesCursor = 0; particlesCursor < totalOfParticles; particlesCursor++ {
-				particles[particlesCursor].YForce = float64(gravity)
-				particles[particlesCursor].XForce = 0
-				for particlesCursor2 = 0; particlesCursor2 < totalOfParticles; particlesCursor2++ {
-					xParticleDistance = particles[particlesCursor].XPos - particles[particlesCursor2].XPos
-					yParticleDistance = particles[particlesCursor].YPos - particles[particlesCursor2].YPos
-					particlesDistance = math.Sqrt(math.Pow(xParticleDistance, 2.0) + math.Pow(yParticleDistance, 2.0))
-					particlesInteraction = particlesDistance/2.0 - 1.0
-					if math.Floor(1.0-particlesInteraction) > 0 {
-						particles[particlesCursor].XForce += particlesInteraction * (xParticleDistance*(3-particles[particlesCursor].Density-particles[particlesCursor2].Density)*float64(pressure) + particles[particlesCursor].XVelocity*float64(viscosity) - particles[particlesCursor2].XVelocity*float64(viscosity)) / particles[particlesCursor].Density
-						particles[particlesCursor].YForce += particlesInteraction * (yParticleDistance*(3-particles[particlesCursor].Density-particles[particlesCursor2].Density)*float64(pressure) + particles[particlesCursor].YVelocity*float64(viscosity) - particles[particlesCursor2].YVelocity*float64(viscosity)) / particles[particlesCursor].Density
-					}
-				}
-			}
-
-			for screenBufferIndex = 0; screenBufferIndex < int(CONSOLE_WIDTH*CONSOLE_HEIGHT); screenBufferIndex++ {
-				screenBuffer[screenBufferIndex] = 0
-			}
-
-			for particlesCursor = 0; particlesCursor < totalOfParticles; particlesCursor++ {
-				if particles[particlesCursor].Wallflag == 0 {
-					if math.Sqrt(math.Pow(particles[particlesCursor].XForce, 2.0)+math.Pow(particles[particlesCursor].YForce, 2.0)) < 4.2 {
-						particles[particlesCursor].XVelocity += particles[particlesCursor].XForce / 10
-						particles[particlesCursor].YVelocity += particles[particlesCursor].YForce / 10
-					} else {
-						particles[particlesCursor].XVelocity += particles[particlesCursor].XForce / 11
-						particles[particlesCursor].YVelocity += particles[particlesCursor].YForce / 11
-					}
-					particles[particlesCursor].XPos += particles[particlesCursor].XVelocity
-					particles[particlesCursor].YPos += particles[particlesCursor].YVelocity
-				}
-				x = int(particles[particlesCursor].XPos)
-				y = int(particles[particlesCursor].YPos / 2)
-				screenBufferIndex = x + CONSOLE_WIDTH*y
-				if y >= 0 && y < int(CONSOLE_HEIGHT-1) && x >= 0 && x < int(CONSOLE_WIDTH-1) {
-					screenBuffer[screenBufferIndex] |= 8
-					screenBuffer[screenBufferIndex+1] |= 4
-					screenBuffer[screenBufferIndex+CONSOLE_WIDTH] |= 2
-					screenBuffer[screenBufferIndex+CONSOLE_WIDTH+1] |= 1
-				}
-			}
-
-			for screenBufferIndex = 0; screenBufferIndex < int(CONSOLE_WIDTH*CONSOLE_HEIGHT); screenBufferIndex++ {
-				if screenBufferIndex%CONSOLE_WIDTH == int(CONSOLE_WIDTH-1) {
-					screenBuffer[screenBufferIndex] = byte('\n')
-				} else {
-					screenBuffer[screenBufferIndex] = byte(" '`-.|//,\\|\\_\\/#"[screenBuffer[screenBufferIndex]])
-				}
-			}
-
-			buffer <- screenBuffer
+			integrateAndRasterize(particles, totalOfParticles, screenBuf, consoleWidth, consoleHeight)
+			buffer <- buildFrame(screenBuf, consoleWidth, consoleHeight)
 		}
 	}()
 
+	// Wait for the simulation goroutine to pre-fill the buffer before
+	// starting to display, so the first frames are available immediately.
 	time.Sleep(5 * time.Second)
 
+	frameDuration := time.Second / time.Duration(targetFPS)
 	for {
-		fmt.Println("\x1b[1;1H")
-		time.Sleep(80 * time.Millisecond)
+		fmt.Print("\x1b[1;1H")
+		time.Sleep(frameDuration)
 		fmt.Printf("%s", <-buffer)
 	}
 }
